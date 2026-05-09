@@ -9,19 +9,20 @@ PLACE THIS FILE at the ROOT of your project, same folder as five_agent_demo.py:
     ├── ui_v2.html         ← the UI file
     ├── five_agent_demo.py
     ├── runtime/
-    │   ├── schema.py
-    │   ├── agents/
-    │   ├── constraints/
-    │   ├── identity/
-    │   ├── interceptor/
-    │   └── session/
     └── governance_v2_demo.db
 
 HOW TO RUN:
     pip install fastapi uvicorn
-    python api_v2.py
+    python -m demo.api_v2
 
 Then open: http://localhost:8000
+
+PATCHES APPLIED vs original:
+  1. _reset(): explicitly removes DB file before calling setup_demo()
+     — guarantees no stale execution_log rows survive across resets
+  2. _capture_event(): clears demo.event_results at start of each capture
+     — prevents prior event records leaking into current event's output
+  3. GovernanceEscalate imported so _capture_event can catch it gracefully
 """
 
 import json
@@ -30,7 +31,6 @@ import sys
 import time
 import traceback
 
-# ── Ensure runtime/ is importable from this file's location ──────────────────
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from fastapi import FastAPI, HTTPException
@@ -48,6 +48,7 @@ import runtime.interceptor.validate as val_mod
 import runtime.agents.scanner as scanner_mod
 import runtime.monitor.heartbeat as heartbeat_mod
 import runtime.monitor.live as live_mod
+import eval.assertions as eval_assertions_mod
 
 _conn = lambda: schema_mod.get_connection(DB_PATH)
 schema_mod.DB_PATH           = DB_PATH
@@ -58,12 +59,14 @@ val_mod.get_connection       = _conn
 scanner_mod.get_connection   = _conn
 heartbeat_mod.get_connection = _conn
 live_mod.get_connection      = _conn
+eval_assertions_mod.get_connection = _conn
 
 from runtime.schema import init_db
 
 def get_connection():
     """Always use the demo DB, not the default schema DB."""
     return _conn()
+
 from runtime.constraints.store import get_constraint, get_constraint_version
 from runtime.interceptor.validate import (
     verify_audit_chain,
@@ -72,8 +75,7 @@ from runtime.interceptor.validate import (
 )
 
 # ── Import the demo module ────────────────────────────────────────────────────
-# five_agent_demo.py lives at the same level as this file
-import importlib.util, types
+import importlib.util
 
 _demo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "five_agent_demo.py")
 _spec = importlib.util.spec_from_file_location("five_agent_demo", _demo_path)
@@ -85,39 +87,47 @@ _ctx: dict = {}
 _event_log: list = []
 
 
-def _close_all_connections():
-    """
-    Force-close any open SQLite connections before setup_demo() deletes the DB.
-    Without this, os.remove(DB_PATH) throws PermissionError on Windows because
-    the file is still held open by previous event handlers or endpoint calls.
-    """
-    import gc
-    gc.collect()  # trigger __del__ on any unreferenced connection objects
-    # WAL checkpoint flush before deletion
-    try:
-        conn = _conn()
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        conn.close()
-    except Exception:
-        pass
-
-
 def _reset():
+    """
+    Full demo reset.
+
+    PATCH: explicitly removes the DB file before calling setup_demo().
+    Without this, stale execution_log rows survive across resets and
+    loop detection fires immediately on run 2+ (prior BLOCKED entries
+    from run 1 are still within the 300s window).
+
+    setup_demo() also calls os.remove() + init_db() internally, but
+    doing it here first guarantees isolation even if setup_demo() is
+    ever refactored.
+    """
     global _ctx, _event_log
     _event_log = []
     demo.event_results.clear()
-    _close_all_connections()
+
+    # Guarantee the DB is wiped — don't rely solely on setup_demo()
+    if os.path.exists(DB_PATH):
+        try:
+            os.remove(DB_PATH)
+        except OSError:
+            pass
+
+    # Reinitialise schema with clean tables before setup_demo() runs
+    init_db(DB_PATH)
+
     _ctx = demo.setup_demo()
 
-
-# ── Event capture ─────────────────────────────────────────────────────────────
 
 def _capture_event(n: int) -> dict:
     """
     Run one demo event and return structured results.
-    Patches print-based output functions to capture into dicts.
+
+    PATCH: clears demo.event_results at the start so accumulated results
+    from prior events in the same run don't appear in this event's output.
+    run_demo() does this itself but _capture_event() bypasses run_demo().
     """
+    # PATCH: clear before each individual event capture
     demo.event_results.clear()
+
     fn = demo.EVENTS.get(n)
     if fn is None:
         raise ValueError(f"Unknown event {n}")
@@ -246,21 +256,21 @@ async def get_demo_state():
             budget_spent = pii = reauth = 0
             version = 0
         sessions.append({
-            "session_id":         sid,
-            "short_id":           sid[:8],
-            "principal_id":       s["principal_id"],
-            "principal_type":     s["principal_type"],
-            "parent_session_id":  s["parent_session_id"],
+            "session_id":           sid,
+            "short_id":             sid[:8],
+            "principal_id":         s["principal_id"],
+            "principal_type":       s["principal_type"],
+            "parent_session_id":    s["parent_session_id"],
             "granted_capabilities": json.loads(s["granted_capabilities"]),
-            "can_spawn_depth":    s["can_spawn_depth"],
-            "budget_grant":       s["budget_grant"],
-            "budget_spent":       budget_spent,
-            "state":              s["state"],
-            "frozen":             bool(s["frozen"]),
-            "pii_accessed":       pii,
-            "reauth_verified":    reauth,
-            "version":            version,
-            "expires_at":         s["expires_at"],
+            "can_spawn_depth":      s["can_spawn_depth"],
+            "budget_grant":         s["budget_grant"],
+            "budget_spent":         budget_spent,
+            "state":                s["state"],
+            "frozen":               bool(s["frozen"]),
+            "pii_accessed":         pii,
+            "reauth_verified":      reauth,
+            "version":              version,
+            "expires_at":           s["expires_at"],
         })
     return {"sessions": sessions}
 

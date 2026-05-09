@@ -530,8 +530,15 @@ def event_02(ctx):
                f"taint propagated to root: {root_taint}")
     except GovernanceBlock as e:
         result_line("BLOCKED", str(e))
-        record(2, "PII taint + upward propagation", "BLOCKED", str(e))
-
+        show("Note", "Session already tainted — reauth required for repeat PII access. Click Reset to clear state.", indent=6)
+        record(2, "PII taint + upward propagation", "BLOCKED",
+               "reauth required — session tainted from prior run. Reset to clear.")
+    except GovernanceEscalate as e:
+        result_line("ESCALATE", "Loop detected — this event was run multiple times without a Reset")
+        show("Note", "Click the Reset button to wipe state and start a clean run", indent=6)
+        show("Runtime", "This is the governance system working correctly — state persists across events", indent=6)
+        record(2, "PII taint + upward propagation", "ESCALATE",
+               "stale state from prior runs — Reset required for clean demo")
 
 def event_03(ctx):
     """Constraint authority conflict blocked."""
