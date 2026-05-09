@@ -134,9 +134,7 @@ def create_session(
     # ── Validate type-capability constraints ──────────────────────────────────
     _validate_type_capability_fit(principal_type, granted_capabilities)
 
-    conn = get_connection()
-
-    try:
+    with get_connection() as conn:
         # ── Root session — no parent attenuation checks ────────────────────────
         if parent_session_id is None:
             _assert_root_session_allowed(principal_type)
@@ -251,8 +249,6 @@ def create_session(
         )
         return session_id
 
-    finally:
-        conn.close()
 
 
 def get_session(session_id: str) -> Optional[dict]:
@@ -266,9 +262,8 @@ def get_session(session_id: str) -> Optional[dict]:
         dict of all session fields, or None if not found.
         granted_capabilities is returned as a Python list (parsed from JSON).
     """
-    conn = get_connection()
-    row = _get_session_row(conn, session_id)
-    conn.close()
+    with get_connection() as conn:
+        row = _get_session_row(conn, session_id)
 
     if row is None:
         return None
@@ -295,38 +290,35 @@ def get_session_tree(root_session_id: str) -> list:
         List of session dicts ordered breadth-first from root.
         Empty list if root session does not exist.
     """
-    conn = get_connection()
+    with get_connection() as conn:
+        root = _get_session_row(conn, root_session_id)
+        if root is None:
+            return []
 
-    root = _get_session_row(conn, root_session_id)
-    if root is None:
-        conn.close()
-        return []
+        result = []
+        queue = [root_session_id]
 
-    result = []
-    queue = [root_session_id]
+        while queue:
+            current_id = queue.pop(0)
+            row = _get_session_row(conn, current_id)
+            if row:
+                session_dict = dict(row)
+                session_dict["granted_capabilities"] = json.loads(
+                    session_dict["granted_capabilities"]
+                )
+                session_dict["active"] = bool(session_dict["active"])
+                session_dict["frozen"] = bool(session_dict["frozen"])
+                session_dict["autonomous_flag"] = bool(session_dict["autonomous_flag"])
+                result.append(session_dict)
 
-    while queue:
-        current_id = queue.pop(0)
-        row = _get_session_row(conn, current_id)
-        if row:
-            session_dict = dict(row)
-            session_dict["granted_capabilities"] = json.loads(
-                session_dict["granted_capabilities"]
-            )
-            session_dict["active"] = bool(session_dict["active"])
-            session_dict["frozen"] = bool(session_dict["frozen"])
-            session_dict["autonomous_flag"] = bool(session_dict["autonomous_flag"])
-            result.append(session_dict)
+            # Find children
+            children = conn.execute(
+                "SELECT session_id FROM sessions WHERE parent_session_id = ?",
+                (current_id,),
+            ).fetchall()
+            queue.extend(c["session_id"] for c in children)
 
-        # Find children
-        children = conn.execute(
-            "SELECT session_id FROM sessions WHERE parent_session_id = ?",
-            (current_id,),
-        ).fetchall()
-        queue.extend(c["session_id"] for c in children)
-
-    conn.close()
-    return result
+        return result
 
 
 def freeze_session(session_id: str, reason: str = "parent_expired") -> None:
@@ -344,8 +336,7 @@ def freeze_session(session_id: str, reason: str = "parent_expired") -> None:
     Raises:
         ValueError: If session does not exist or is already terminated/revoked.
     """
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         row = _get_session_row(conn, session_id)
         if row is None:
             raise ValueError(f"Session '{session_id}' does not exist.")
@@ -366,8 +357,6 @@ def freeze_session(session_id: str, reason: str = "parent_expired") -> None:
                 """,
                 (session_id,),
             )
-    finally:
-        conn.close()
 
 
 def terminate_session(session_id: str) -> None:
@@ -383,8 +372,7 @@ def terminate_session(session_id: str) -> None:
     Raises:
         ValueError: If session does not exist.
     """
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         row = _get_session_row(conn, session_id)
         if row is None:
             raise ValueError(f"Session '{session_id}' does not exist.")
@@ -400,8 +388,6 @@ def terminate_session(session_id: str) -> None:
                 """,
                 (session_id,),
             )
-    finally:
-        conn.close()
 
 
 def revoke_session(session_id: str) -> None:
@@ -417,8 +403,7 @@ def revoke_session(session_id: str) -> None:
     Raises:
         ValueError: If session does not exist.
     """
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         row = _get_session_row(conn, session_id)
         if row is None:
             raise ValueError(f"Session '{session_id}' does not exist.")
@@ -434,8 +419,6 @@ def revoke_session(session_id: str) -> None:
                 """,
                 (session_id,),
             )
-    finally:
-        conn.close()
 
     # Cascade freeze all children with depth tracking
     cascade_freeze(session_id, propagation_depth=0)
@@ -461,9 +444,7 @@ def cascade_freeze(session_id: str, propagation_depth: int = 0) -> None:
         To freeze the trigger itself, call freeze_session() first.
         BFS prevents stack overflow on deep session trees.
     """
-    conn = get_connection()
-
-    try:
+    with get_connection() as conn:
         now = datetime.now(timezone.utc).isoformat()
         queue = [(session_id, propagation_depth)]
 
@@ -537,8 +518,6 @@ def cascade_freeze(session_id: str, propagation_depth: int = 0) -> None:
 
                 queue.append((child_id, depth + 1))
 
-    finally:
-        conn.close()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

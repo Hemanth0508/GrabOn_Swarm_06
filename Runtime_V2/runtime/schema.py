@@ -61,7 +61,18 @@ class GovernanceConnection(sqlite3.Connection):
     """
     SQLite connection with lock retry, write serialization, and guaranteed close
     on context-manager exit.
+
+    Nesting safety: tracks __enter__ depth so that nested `with conn:` blocks
+    (common in cascade_freeze, validate.py budget block, etc.) only commit on
+    inner exit — the connection is only closed when the outermost with-block
+    exits. This prevents "Cannot operate on a closed database" when a single
+    connection object is reused across multiple with-blocks in one function.
     """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._depth = 0  # context-manager nesting depth
+
     def _retrying(self, fn, sql: str | None = None, *args, **kwargs):
         is_write = _is_write_sql(sql or "")
         for attempt in range(SQLITE_LOCK_RETRIES + 1):
@@ -76,25 +87,50 @@ class GovernanceConnection(sqlite3.Connection):
         raise RuntimeError("unreachable retry loop")
 
     def execute(self, sql, parameters=(), /):
-        return self._retrying(lambda: super().execute(sql, parameters), sql)
+        return self._retrying(
+            lambda: sqlite3.Connection.execute(self, sql, parameters),
+            sql,
+        )
 
     def executemany(self, sql, seq_of_parameters, /):
-        return self._retrying(lambda: super().executemany(sql, seq_of_parameters), sql)
+        return self._retrying(
+            lambda: sqlite3.Connection.executemany(self, sql, seq_of_parameters),
+            sql,
+        )
 
     def executescript(self, sql_script, /):
-        return self._retrying(lambda: super().executescript(sql_script), sql_script)
+        return self._retrying(
+            lambda: sqlite3.Connection.executescript(self, sql_script),
+            sql_script,
+        )
 
     def commit(self):
-        return self._retrying(lambda: super().commit(), "commit")
+        return self._retrying(
+            lambda: sqlite3.Connection.commit(self),
+            "commit",
+        )
+
+    def rollback(self):
+        return sqlite3.Connection.rollback(self)
 
     def __enter__(self):
+        self._depth += 1
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        self._depth -= 1
         try:
-            sqlite3.Connection.__exit__(self, exc_type, exc, tb)
+            if exc_type is None:
+                sqlite3.Connection.commit(self)
+            else:
+                sqlite3.Connection.rollback(self)
+        except Exception:
+            pass
         finally:
-            self.close()
+            # Only close when outermost with-block exits.
+            # Inner nested with-blocks (depth > 0 remaining) just commit.
+            if self._depth == 0:
+                sqlite3.Connection.close(self)
         return False
 
 

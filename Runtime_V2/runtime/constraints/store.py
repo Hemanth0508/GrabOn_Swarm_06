@@ -155,8 +155,7 @@ def write_constraint(
         ValueError: If a higher-priority write already exists for this key.
         ValueError: If value is not JSON-serializable.
     """
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         _write_constraint_internal(
             conn=conn,
             session_id=session_id,
@@ -170,8 +169,6 @@ def write_constraint(
             signature=signature,
             propagate_taint=True,
         )
-    finally:
-        conn.close()
 
 
 def get_constraint(session_id: str, key: str) -> Any:
@@ -195,11 +192,8 @@ def get_constraint(session_id: str, key: str) -> Any:
         Returns the defined default from CONSTRAINT_DEFAULTS if no row exists.
         Returns None if key has no default and no row exists.
     """
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         return _read_constraint(conn, session_id, key)
-    finally:
-        conn.close()
 
 
 def get_constraint_version(session_id: str) -> int:
@@ -217,8 +211,7 @@ def get_constraint_version(session_id: str) -> int:
     Returns:
         Current version integer. 0 if no constraints have been written.
     """
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         row = conn.execute(
             """
             SELECT MAX(version) as current_version
@@ -229,8 +222,6 @@ def get_constraint_version(session_id: str) -> int:
         ).fetchone()
         v = row["current_version"] if row else None
         return v if v is not None else 0
-    finally:
-        conn.close()
 
 
 def snapshot_if_needed(session_id: str) -> None:
@@ -250,11 +241,8 @@ def snapshot_if_needed(session_id: str) -> None:
         It is exposed publicly so the interceptor can trigger it explicitly
         if needed (e.g. before a long-running workflow starts).
     """
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         _snapshot_if_needed_internal(conn, session_id)
-    finally:
-        conn.close()
 
 
 def reconstruct_state(session_id: str) -> dict:
@@ -278,11 +266,8 @@ def reconstruct_state(session_id: str) -> dict:
         dict mapping constraint_key -> current_value for all active constraints.
         Empty dict if no constraints exist.
     """
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         return _reconstruct_state_internal(conn, session_id)
-    finally:
-        conn.close()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
