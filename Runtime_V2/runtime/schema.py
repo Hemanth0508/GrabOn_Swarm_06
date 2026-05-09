@@ -22,9 +22,87 @@ Tables:
 """
 
 import sqlite3
+import threading
+import time
 from pathlib import Path
 
 DB_PATH = "governance_v2.db"
+
+# SQLite concurrency hardening knobs.
+SQLITE_BUSY_TIMEOUT_MS = 5000
+SQLITE_LOCK_RETRIES = 6
+SQLITE_RETRY_BASE_DELAY_S = 0.05
+
+# Process-wide write lock to serialize write transactions.
+_DB_WRITE_LOCK = threading.RLock()
+
+_WRITE_PREFIXES = (
+    "insert", "update", "delete", "replace",
+    "create", "drop", "alter", "pragma", "begin",
+    "commit", "rollback", "vacuum", "reindex",
+)
+
+
+def _is_write_sql(sql: str) -> bool:
+    if not isinstance(sql, str):
+        return False
+    s = sql.lstrip().lower()
+    return s.startswith(_WRITE_PREFIXES)
+
+
+def _is_lock_error(exc: Exception) -> bool:
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    msg = str(exc).lower()
+    return "database is locked" in msg or "database table is locked" in msg or "busy" in msg
+
+
+class GovernanceConnection(sqlite3.Connection):
+    """
+    SQLite connection with lock retry, write serialization, and guaranteed close
+    on context-manager exit.
+    """
+    def _retrying(self, fn, sql: str | None = None, *args, **kwargs):
+        is_write = _is_write_sql(sql or "")
+        for attempt in range(SQLITE_LOCK_RETRIES + 1):
+            lock_cm = _DB_WRITE_LOCK if is_write else _NullContext()
+            with lock_cm:
+                try:
+                    return fn(*args, **kwargs)
+                except Exception as exc:
+                    if not _is_lock_error(exc) or attempt >= SQLITE_LOCK_RETRIES:
+                        raise
+            time.sleep(SQLITE_RETRY_BASE_DELAY_S * (attempt + 1))
+        raise RuntimeError("unreachable retry loop")
+
+    def execute(self, sql, parameters=(), /):
+        return self._retrying(lambda: super().execute(sql, parameters), sql)
+
+    def executemany(self, sql, seq_of_parameters, /):
+        return self._retrying(lambda: super().executemany(sql, seq_of_parameters), sql)
+
+    def executescript(self, sql_script, /):
+        return self._retrying(lambda: super().executescript(sql_script), sql_script)
+
+    def commit(self):
+        return self._retrying(lambda: super().commit(), "commit")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            sqlite3.Connection.__exit__(self, exc_type, exc, tb)
+        finally:
+            self.close()
+        return False
+
+
+class _NullContext:
+    def __enter__(self):
+        return None
+    def __exit__(self, exc_type, exc, tb):
+        return False
 
 
 def get_connection(db_path: str = DB_PATH) -> sqlite3.Connection:
@@ -33,11 +111,18 @@ def get_connection(db_path: str = DB_PATH) -> sqlite3.Connection:
     WAL mode for concurrent read performance.
     Foreign keys enforced on every connection.
     """
-    conn = sqlite3.connect(db_path, isolation_level="DEFERRED")
+    conn = sqlite3.connect(
+        db_path,
+        isolation_level="DEFERRED",
+        timeout=SQLITE_BUSY_TIMEOUT_MS / 1000.0,
+        factory=GovernanceConnection,
+    )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA synchronous=FULL")
+    conn.execute("PRAGMA temp_store=MEMORY")
     return conn
 
 
@@ -52,9 +137,7 @@ def init_db(db_path: str = DB_PATH) -> None:
     Args:
         db_path: Path to the SQLite database file. Defaults to governance_v2.db.
     """
-    conn = get_connection(db_path)
-
-    with conn:
+    with get_connection(db_path) as conn:
         # ──────────────────────────────────────────────────────────────
         # TABLE 1 — principals
         # ──────────────────────────────────────────────────────────────
@@ -466,16 +549,13 @@ def init_db(db_path: str = DB_PATH) -> None:
             VALUES ('00000000-0000-0000-0000-000000000000', 'INTERCEPTOR', '', ?)
         """, (datetime.now(timezone.utc).isoformat(),))
 
-    conn.close()
-
 
 def drop_all(db_path: str = DB_PATH) -> None:
     """
     Drop all v2 tables in dependency-safe order.
     Used only for testing. Never call in production.
     """
-    conn = get_connection(db_path)
-    with conn:
+    with get_connection(db_path) as conn:
         conn.executescript("""
             DROP TABLE IF EXISTS heartbeat_log;
             DROP TABLE IF EXISTS rate_limit_counters;
@@ -490,8 +570,6 @@ def drop_all(db_path: str = DB_PATH) -> None:
             DROP TABLE IF EXISTS sessions;
             DROP TABLE IF EXISTS principals;
         """)
-    conn.close()
-
 
 def verify_schema(db_path: str = DB_PATH) -> dict:
     """
@@ -514,20 +592,17 @@ def verify_schema(db_path: str = DB_PATH) -> dict:
         "heartbeat_log":         6,
     }
 
-    conn = get_connection(db_path)
     result = {}
-
-    for table, expected_cols in expected_tables.items():
-        rows = conn.execute(
-            f"PRAGMA table_info({table})"
-        ).fetchall()
-        assert len(rows) == expected_cols, (
-            f"Table '{table}': expected {expected_cols} columns, "
-            f"found {len(rows)}"
-        )
-        result[table] = len(rows)
-
-    conn.close()
+    with get_connection(db_path) as conn:
+        for table, expected_cols in expected_tables.items():
+            rows = conn.execute(
+                f"PRAGMA table_info({table})"
+            ).fetchall()
+            assert len(rows) == expected_cols, (
+                f"Table '{table}': expected {expected_cols} columns, "
+                f"found {len(rows)}"
+            )
+            result[table] = len(rows)
     return result
 
 
