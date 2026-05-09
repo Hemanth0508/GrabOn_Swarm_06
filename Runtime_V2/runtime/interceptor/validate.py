@@ -366,6 +366,7 @@ def _validate_inner(
     timestamp  = datetime.now(timezone.utc).isoformat()
     action_id  = str(uuid.uuid4())
     conn       = get_connection()
+    conn.__enter__()  # increment depth to 1 so nested with-conn blocks don't close
 
     # ── Internal helpers ─────────────────────────────────────────────────────
 

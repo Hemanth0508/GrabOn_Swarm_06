@@ -667,11 +667,10 @@ def event_06(ctx):
     except ValueError as e:
         result_line("BLOCKED", f"Spawn rejected: {e}")
         show("Reason", "can_spawn_depth=0 on Agent 5 session", indent=6)
-        conn = _conn()
-        depth_events = conn.execute(
-            "SELECT COUNT(*) as cnt FROM cascade_events WHERE event_type='CASCADE_DEPTH_EXCEEDED'",
-        ).fetchone()["cnt"]
-        conn.close()
+        with _conn() as conn:
+            depth_events = conn.execute(
+                "SELECT COUNT(*) as cnt FROM cascade_events WHERE event_type='CASCADE_DEPTH_EXCEEDED'",
+            ).fetchone()["cnt"]
         record(6, "Spawn depth exhausted", "BLOCKED", "can_spawn_depth=0 enforced")
 
 
@@ -703,12 +702,11 @@ def event_07(ctx):
 
     if not sub_state["frozen"]:
         # cascade_freeze only hits direct children — verify parent link
-        conn = _conn()
-        row = conn.execute(
-            "SELECT parent_session_id FROM sessions WHERE session_id = ?",
-            (ctx["sub_sid"],)
-        ).fetchone()
-        conn.close()
+        with _conn() as conn:
+            row = conn.execute(
+                "SELECT parent_session_id FROM sessions WHERE session_id = ?",
+                (ctx["sub_sid"],)
+            ).fetchone()
         show("Agent 5 parent_session_id", str(row["parent_session_id"])[:8] + "...")
         show("data_sid", ctx["data_sid"][:8] + "...")
         show("Note", "cascade_freeze propagates to direct children only")
@@ -723,12 +721,11 @@ def event_07(ctx):
         show("Cascade event", "CASCADE_FROZEN written to cascade_events table", indent=6)
         record(7, "Orphan frozen state", "BLOCKED", f"agent 5 frozen: {sub_state['state']}")
 
-    conn = _conn()
-    cascade = conn.execute(
-        "SELECT COUNT(*) as cnt FROM cascade_events WHERE trigger_session_id = ?",
-        (ctx["data_sid"],)
-    ).fetchone()["cnt"]
-    conn.close()
+    with _conn() as conn:
+        cascade = conn.execute(
+            "SELECT COUNT(*) as cnt FROM cascade_events WHERE trigger_session_id = ?",
+            (ctx["data_sid"],)
+        ).fetchone()["cnt"]
     show("cascade_events written", cascade)
 
 
@@ -825,20 +822,25 @@ def event_09(ctx):
     # NOTE: This bypasses store validation intentionally for demo attack simulation.
     # In production this write path does not exist — all constraint writes go
     # through write_constraint() which enforces signature + authority checks.
-    conn = _conn()
-    now_iso = datetime.now(timezone.utc).isoformat()
-    conn.execute(
-        """
-        INSERT INTO constraints
-            (session_id, constraint_key, constraint_value, written_by_principal,
-             priority_level, valid_from, idempotency_key, signature, version, set_at)
-        VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 999, ?)
-        """,
-        (ctx["data_sid"], "reauth_verified", "true",
-         ctx["orch_pid"], 1, now_iso, now_iso)
-    )
-    conn.commit()
-    conn.close()
+    with _conn() as conn:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        # Use MAX(version)+1 so this never collides with existing rows
+        row = conn.execute(
+            "SELECT COALESCE(MAX(version), 0) + 1 AS next_ver FROM constraints WHERE session_id = ?",
+            (ctx["data_sid"],)
+        ).fetchone()
+        tamper_version = row["next_ver"] if row else 1000
+        conn.execute(
+            """
+            INSERT INTO constraints
+                (session_id, constraint_key, constraint_value, written_by_principal,
+                 priority_level, valid_from, idempotency_key, signature, version, set_at)
+            VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+            """,
+            (ctx["data_sid"], "reauth_verified", "true",
+             ctx["orch_pid"], 1, now_iso, tamper_version, now_iso)
+        )
+        conn.commit()
     show("Direct write", "reauth_verified=true written directly to DB (no signature)")
 
     chain_ok, msg = verify_audit_chain(ctx["orch_sid"])
@@ -846,18 +848,17 @@ def event_09(ctx):
     show("Chain status", msg[:60])
 
     # Tamper the execution_log to simulate attacker covering tracks
-    conn = _conn()
-    first_entry = conn.execute(
-        "SELECT action_id FROM execution_log WHERE session_id = ? LIMIT 1",
-        (ctx["orch_sid"],)
-    ).fetchone()
-    if first_entry:
-        conn.execute(
-            "UPDATE execution_log SET reason = 'tampered_reason_injected' WHERE action_id = ?",
-            (first_entry["action_id"],)
-        )
-        conn.commit()
-    conn.close()
+    with _conn() as conn:
+        first_entry = conn.execute(
+            "SELECT action_id FROM execution_log WHERE session_id = ? LIMIT 1",
+            (ctx["orch_sid"],)
+        ).fetchone()
+        if first_entry:
+            conn.execute(
+                "UPDATE execution_log SET reason = 'tampered_reason_injected' WHERE action_id = ?",
+                (first_entry["action_id"],)
+            )
+            conn.commit()
 
     chain_ok2, msg2 = verify_audit_chain(ctx["orch_sid"])
     show("Chain after log tamper", "BROKEN" if not chain_ok2 else "intact")
@@ -937,13 +938,12 @@ def event_11(ctx):
         results.append(d.result)
         show(f"Session {i+1} spend $190", d.result)
 
-    conn = _conn()
-    ledger = conn.execute(
-        "SELECT current_value FROM principal_ledger "
-        "WHERE principal_id = ? AND metric_key = 'budget_spent'",
-        (ctx["agent3_pid"],)
-    ).fetchone()
-    conn.close()
+    with _conn() as conn:
+        ledger = conn.execute(
+            "SELECT current_value FROM principal_ledger "
+            "WHERE principal_id = ? AND metric_key = 'budget_spent'",
+            (ctx["agent3_pid"],)
+        ).fetchone()
 
     ledger_total = ledger["current_value"] if ledger else 0.0
     show("Principal ledger total", f"${ledger_total:.2f}")

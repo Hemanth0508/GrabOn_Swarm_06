@@ -85,10 +85,28 @@ _ctx: dict = {}
 _event_log: list = []
 
 
+def _close_all_connections():
+    """
+    Force-close any open SQLite connections before setup_demo() deletes the DB.
+    Without this, os.remove(DB_PATH) throws PermissionError on Windows because
+    the file is still held open by previous event handlers or endpoint calls.
+    """
+    import gc
+    gc.collect()  # trigger __del__ on any unreferenced connection objects
+    # WAL checkpoint flush before deletion
+    try:
+        conn = _conn()
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.close()
+    except Exception:
+        pass
+
+
 def _reset():
     global _ctx, _event_log
     _event_log = []
     demo.event_results.clear()
+    _close_all_connections()
     _ctx = demo.setup_demo()
 
 
