@@ -51,7 +51,7 @@ Assignment 06 asks the question that determines whether an agentic system is act
 
 ## Demo
 
-> 📺 **Loom Walkthrough:** `[INSERT LOOM LINK]`
+> 📺 **Loom Walkthrough:** `[[INSERT LOOM LINK]](https://drive.google.com/drive/folders/1vyXRegDYnjBiBiSBq41HjNlVBuO-nopd?usp=sharing)`
 > Covers: happy path end-to-end (Event 19), failure recovery (Events 17 + 20), eval run (11/11), architecture walkthrough, provider failover live.
 
 > 🌐 **Web UI:** `http://localhost:8000` after `python -m Runtime_V2.demo.api_v2`
