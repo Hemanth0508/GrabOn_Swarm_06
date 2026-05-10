@@ -17,7 +17,7 @@ I chose Assignment 06 because the core question — *how do you enforce constrai
 
 ## Demo
 
-> 📺 **Loom Walkthrough:** `[INSERT LOOM LINK]`
+> 📺 **Loom Walkthrough:** https://drive.google.com/drive/folders/1vyXRegDYnjBiBiSBq41HjNlVBuO-nopd?usp=sharing
 > Covers: happy path end-to-end (Event 19), failure recovery (Events 17+20), eval run (11/11), architecture walkthrough, provider failover live demo.
 
 > 🌐 **Web UI:** `http://localhost:8000` after `python -m demo.api_v2`
